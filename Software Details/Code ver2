@@ -1,0 +1,131 @@
+import time
+from machine import Pin, PWM, TouchPad
+from neopixel import NeoPixel
+
+# ---------- PINS ----------
+trig = Pin(32, Pin.OUT)
+echo = Pin(33, Pin.IN)
+
+leds = [Pin(p, Pin.OUT) for p in (18, 19, 21, 22)]
+
+touches = [
+    TouchPad(Pin(4)),
+    TouchPad(Pin(14)),
+    TouchPad(Pin(12)),
+    TouchPad(Pin(13))
+]
+
+buzzer = PWM(Pin(23))
+buzzer.duty(0)
+
+sphinx = PWM(Pin(5), freq=50)
+door   = PWM(Pin(16), freq=50)  # NEW: vault door servo
+
+np = NeoPixel(Pin(15), 8)
+
+THRESHOLD = 300
+answers = [1, 0, 2, 3, 0, 2]
+
+q = 0
+correct = 0
+wrong = 0
+active = False
+
+# ---------- HELPERS ----------
+def beep(freq, t):
+    buzzer.freq(freq)
+    buzzer.duty(512)
+    time.sleep_ms(t)
+    buzzer.duty(0)
+
+def set_leds(n):
+    for i in range(4):
+        leds[i].value(1 if i < n else 0)
+
+def np_color(r, g, b):
+    for i in range(8):
+        np[i] = (r, g, b)
+    np.write()
+
+def nod():
+    sphinx.duty(60)
+    time.sleep(0.3)
+    sphinx.duty(90)
+    time.sleep(0.3)
+    sphinx.duty(60)
+
+# NEW: door control
+def open_door():
+    door.duty(110)
+
+def close_door():
+    door.duty(40)
+
+def distance():
+    trig.off(); time.sleep_us(2)
+    trig.on(); time.sleep_us(10); trig.off()
+    t = time.ticks_us()
+    while echo.value() == 0:
+        if time.ticks_diff(time.ticks_us(), t) > 30000: return 999
+    t = time.ticks_us()
+    while echo.value() == 1:
+        if time.ticks_diff(time.ticks_us(), t) > 30000: return 999
+    return time.ticks_diff(time.ticks_us(), t) * 17 // 1000
+
+def get_touch():
+    for i, t in enumerate(touches):
+        if t.read() < THRESHOLD:
+            return i
+    return -1
+
+# ---------- GAME LOGIC ----------
+def start_game():
+    global q, correct, wrong, active
+    q = 0; correct = 0; wrong = 0; active = True
+    set_leds(0)
+    close_door()            # NEW: reset door at start
+    np_color(0, 0, 0)
+    print("GAME START")
+
+def do_correct():
+    global correct, q, active
+    correct += 1
+    set_leds(correct)
+    np_color(0, 255, 0)
+    beep(800, 150)
+    q += 1
+    if correct >= 4:
+        print("WIN")
+        open_door()         # NEW: open vault on win
+        np_color(0, 0, 255)
+        active = False
+
+def do_wrong():
+    global wrong, q, active
+    wrong += 1
+    np_color(255, 0, 0)
+    beep(200, 300)
+    nod()
+    q += 1
+    if wrong >= 3:
+        print("LOSE")
+        active = False
+
+# ---------- MAIN LOOP ----------
+while True:
+    if not active:
+        if distance() < 20:
+            start_game()
+        time.sleep(0.2)
+        continue
+
+    t = get_touch()
+    if t != -1:
+        print("Touched:", t)
+        if t == answers[q]:
+            do_correct()
+        else:
+            do_wrong()
+        time.sleep(0.5)
+
+    time.sleep(0.05)
