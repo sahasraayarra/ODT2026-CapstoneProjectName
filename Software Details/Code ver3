@@ -1,0 +1,249 @@
+import time, network, socket, random
+from machine import Pin, PWM, TouchPad
+from neopixel import NeoPixel
+
+# ---------- PINS ----------
+trig = Pin(32, Pin.OUT)
+echo = Pin(33, Pin.IN)
+
+leds = [Pin(p, Pin.OUT) for p in (18,19,21,22)]
+
+touches = [
+    TouchPad(Pin(4)),   # A
+    TouchPad(Pin(14)),  # B
+    TouchPad(Pin(12)),  # C
+    TouchPad(Pin(13))   # D
+]
+
+buzzer = PWM(Pin(23))
+buzzer.duty(0)
+
+sphinx = PWM(Pin(5), freq=50)    # head
+door   = PWM(Pin(16), freq=50)   # vault
+
+np = NeoPixel(Pin(15), 12)   
+
+THRESHOLD = 300
+
+# ---------- GAME ----------
+answers = [1,0,2,3,0,2]
+
+q = 0
+correct = 0
+wrong = 0
+active = False
+
+# ---------- FUNCTIONS ----------
+def beep(freq, t):
+    buzzer.freq(freq)
+    buzzer.duty(512)
+    time.sleep_ms(t)
+    buzzer.duty(0)
+
+def np_color(r,g,b):
+    for i in range(12):
+        np[i]=(r,g,b)
+    np.write()
+
+def set_leds(n):
+    for i in range(4):
+        leds[i].value(1 if i < n else 0)
+
+def nod():
+    sphinx.duty(60)
+    time.sleep(0.3)
+    sphinx.duty(90)
+    time.sleep(0.3)
+    sphinx.duty(60)
+
+def open_door():
+    door.duty(110)
+
+def close_door():
+    door.duty(40)
+
+def rainbow():
+    colors = [
+        (255,0,0),
+        (255,100,0),
+        (255,255,0),
+        (0,255,0),
+        (0,0,255),
+        (150,0,255)
+    ]
+    for _ in range(5):
+        for c in colors:
+            for i in range(12):
+                np[i] = c
+            np.write()
+            time.sleep(0.2)
+
+def distance():
+    trig.off(); time.sleep_us(2)
+    trig.on(); time.sleep_us(10); trig.off()
+
+    t = time.ticks_us()
+    while echo.value()==0:
+        if time.ticks_diff(time.ticks_us(),t)>30000: return 999
+    t = time.ticks_us()
+    while echo.value()==1:
+        if time.ticks_diff(time.ticks_us(),t)>30000: return 999
+
+    return time.ticks_diff(time.ticks_us(),t)*17//1000
+
+def get_touch():
+    for i,t in enumerate(touches):
+        if t.read() < THRESHOLD:
+            return i
+    return -1
+
+def start_game():
+    global q, correct, wrong, active
+    q = 0
+    correct = 0
+    wrong = 0
+    active = True
+    set_leds(0)
+    close_door()
+    np_color(0,0,0)
+    print("GAME START")
+
+def do_correct():
+    global correct, q, active
+    correct += 1
+    set_leds(correct)
+    np_color(0,255,0)
+    beep(800,150)
+    q += 1
+
+    if correct >= 4:
+        print("WIN")
+        open_door()
+        rainbow()   # 🎉 WIN EFFECT
+        active = False
+
+def do_wrong():
+    global wrong, q, active
+    wrong += 1
+    np_color(255,0,0)
+    beep(200,300)
+    nod()
+    q += 1
+
+    if wrong >= 3:
+        print("LOSE")
+        active = False
+
+# ---------- WIFI ----------
+ap = network.WLAN(network.AP_IF)
+ap.active(True)
+ap.config(essid='SphinxGame', password='12345678')
+
+server = socket.socket()
+server.bind(('',80))
+server.listen(1)
+server.setblocking(False)
+
+print("Open 192.168.4.1")
+
+# ---------- HTML (DISPLAY ONLY) ----------
+PAGE = """<!DOCTYPE html>
+<html>
+<body style="background:black;color:white;text-align:center;font-family:sans-serif">
+
+<h2>🗿 Sphinx Riddles</h2>
+<h3 id="q">Walk closer to start</h3>
+<p id="opts"></p>
+<p id="score"></p>
+
+<script>
+var Q = [
+["2+2=?",["3","4","5","6"]],
+["Fruit?",["Carrot","Apple","Stone","Iron"]],
+["Sky?",["Green","Blue","Red","Pink"]],
+["Fire is?",["Cold","Hot","Wet","Soft"]],
+["Water?",["Dry","Wet","Hard","Hot"]],
+["Sun?",["Cold","Hot","Dark","Blue"]]
+];
+
+function update(){
+ fetch('/state')
+ .then(r=>r.json())
+ .then(s=>{
+    if(!s.active){
+        document.getElementById("q").innerHTML="Walk closer to start";
+        document.getElementById("opts").innerHTML="";
+        return;
+    }
+
+    var q = Q[s.q];
+
+    document.getElementById("q").innerHTML = q[0];
+
+    document.getElementById("opts").innerHTML =
+        "A: "+q[1][0]+"<br>" +
+        "B: "+q[1][1]+"<br>" +
+        "C: "+q[1][2]+"<br>" +
+        "D: "+q[1][3];
+
+    document.getElementById("score").innerHTML =
+        "Correct: "+s.correct+" | Wrong: "+s.wrong;
+ });
+}
+
+setInterval(update, 700);
+</script>
+
+</body>
+</html>
+"""
+
+# ---------- SERVER ----------
+def handle(conn):
+    req = conn.recv(512).decode()
+    path = req.split(' ')[1]
+
+    if path=='/' or path=='/index.html':
+        conn.send('HTTP/1.1 200 OK\r\nContent-Type:text/html\r\n\r\n')
+        conn.send(PAGE)
+
+    elif path=='/state':
+        data = '{"q":%d,"correct":%d,"wrong":%d,"active":%s}' % (
+            q, correct, wrong, 'true' if active else 'false'
+        )
+        conn.send('HTTP/1.1 200 OK\r\nContent-Type:application/json\r\n\r\n')
+        conn.send(data)
+
+    conn.close()
+
+# ---------- MAIN LOOP ----------
+while True:
+
+    # web
+    try:
+        c,_ = server.accept()
+        handle(c)
+    except:
+        pass
+
+    # start game
+    if not active:
+        if distance() < 20:
+            start_game()
+        time.sleep(0.2)
+        continue
+
+    # touch input
+    t = get_touch()
+
+    if t != -1:
+        print("Touched:", t)
+
+        if t == answers[q]:
+            do_correct()
+        else:
+            do_wrong()
+
+        time.sleep(0.5)
+
+    time.sleep(0.05)
