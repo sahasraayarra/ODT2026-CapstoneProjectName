@@ -1,0 +1,524 @@
+import time, network, socket
+from machine import Pin, PWM, TouchPad
+from neopixel import NeoPixel
+
+trig = Pin(32, Pin.OUT)
+echo = Pin(33, Pin.IN)
+
+leds = [Pin(p, Pin.OUT) for p in (18,19,21,22)]
+
+touches = [
+    TouchPad(Pin(4)),
+    TouchPad(Pin(14)),
+    TouchPad(Pin(12)),
+    TouchPad(Pin(13))
+]
+
+buzzer = PWM(Pin(23))
+buzzer.duty(0)
+
+sphinx = PWM(Pin(5), freq=50)
+door   = PWM(Pin(26), freq=50)
+
+np = NeoPixel(Pin(15), 16)
+
+#TOUCH
+time.sleep(1)
+baseline = [t.read() for t in touches]
+THRESHOLD = 100
+
+def safe_read(t):
+    try:
+        return t.read()
+    except:
+        return 1000
+
+def get_touch():
+    for i in range(4):
+        if safe_read(touches[i]) < baseline[i] - THRESHOLD:
+            time.sleep(0.1)
+            return i
+    return -1
+
+#FUNCTIONS
+def beep(freq, duration):
+    buzzer.freq(freq)
+    buzzer.duty(512)
+    time.sleep(duration)
+    buzzer.duty(0)
+
+def set_leds(n):
+    for i in range(4):
+        leds[i].value(1 if i < n else 0)
+
+def neopixel_fill(r,g,b):
+    for i in range(len(np)):
+        np[i]=(r,g,b)
+    np.write()
+
+def rainbow():
+    colors=[(255,0,0),(255,100,0),(255,255,0),
+            (0,255,0),(0,0,255),(150,0,255)]
+    for _ in range(3):
+        for c in colors:
+            neopixel_fill(*c)
+            time.sleep(0.1)
+
+def nod():
+    sphinx.duty(60)
+    time.sleep(0.3)
+    sphinx.duty(90)
+    time.sleep(0.3)
+    sphinx.duty(60)
+
+def open_door():
+    for d in range(40, 75, 1):
+        door.duty(d)
+        time.sleep(0.05)
+
+#ULTRASONIC 
+def distance():
+    trig.off(); time.sleep_us(2)
+    trig.on(); time.sleep_us(10)
+    trig.off()
+
+    timeout = time.ticks_ms()
+
+    while echo.value()==0:
+        if time.ticks_diff(time.ticks_ms(), timeout) > 100:
+            return 999
+    start=time.ticks_us()
+
+    while echo.value()==1:
+        if time.ticks_diff(time.ticks_ms(), timeout) > 100:
+            return 999
+    end=time.ticks_us()
+
+    return (end-start)/58
+
+#GAME
+answers = [1,0,2,3,0,2,1,3]
+
+q = 0
+correct = 0
+wrong = 0
+active = False
+last_result = ""
+
+pair_correct = 0
+pair_index = 0
+led_progress = 0
+
+game_over = False
+game_result = ""   
+
+def start_game():
+    global q,correct,wrong,active,last_result
+    global pair_correct,pair_index,led_progress
+
+    q=0
+    correct=0
+    wrong=0
+    active=True
+    last_result=""
+
+    pair_correct=0
+    pair_index=0
+    led_progress=0
+
+    set_leds(0)
+    neopixel_fill(0,0,0)
+
+def evaluate_pair():
+    global pair_correct, pair_index, led_progress
+    global active, game_over, game_result
+
+    passed = False
+
+    if pair_index < 2:
+        if pair_correct >= 1:
+            passed = True
+    else:
+        if pair_correct == 2:
+            passed = True
+
+    if passed:
+        led_progress += 1
+        set_leds(led_progress)
+    else:
+        active = False
+        game_over = True
+        game_result = "lose"
+        beep(100,1)
+        return
+
+    pair_correct = 0
+    pair_index += 1
+
+    if led_progress >= 4:
+        open_door()
+        rainbow()
+        beep(1000,0.2); beep(1200,0.2); beep(1400,0.2)
+        active = False
+        game_over = True
+        game_result = "win"
+
+def do_correct():
+    global correct,q,last_result,pair_correct
+    correct += 1
+    pair_correct += 1
+    last_result = "correct"
+
+    neopixel_fill(0,255,0)
+    beep(800,0.15)
+
+    q += 1
+
+    if q % 2 == 0:
+        evaluate_pair()
+
+def do_wrong():
+    global wrong,q,last_result
+    wrong += 1
+    last_result = "wrong"
+
+    neopixel_fill(255,0,0)
+    beep(200,0.3)
+    nod()
+
+    q += 1
+
+    if q % 2 == 0:
+        evaluate_pair()
+
+#WIFI
+ap = network.WLAN(network.AP_IF)
+ap.active(True)
+ap.config(essid='SphinxGame', password='12345678')
+
+server = socket.socket()
+server.bind(('',80))
+server.listen(1)
+server.setblocking(False)
+
+print("Open 192.168.4.1")
+
+# ---------- HTML ----------
+PAGE = """<!DOCTYPE html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&family=IM+Fell+English:ital@0;1&display=swap" rel="stylesheet">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+
+  body{
+    background:#1c1008;
+    color:#e8cc80;
+    font-family:'IM Fell English',Georgia,serif;
+    min-height:100vh;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding:24px;
+    background-image:
+      repeating-linear-gradient(0deg,transparent,transparent 39px,rgba(202,166,75,0.04) 40px),
+      repeating-linear-gradient(90deg,transparent,transparent 39px,rgba(202,166,75,0.04) 40px);
+  }
+
+  .card{
+    background:linear-gradient(160deg,#2a1a08 0%,#1e1206 100%);
+    padding:36px 32px;
+    border-radius:4px;
+    border:1px solid #7a5a1e;
+    box-shadow:0 0 0 4px #1c1008, 0 0 0 5px #7a5a1e, 0 0 40px rgba(202,166,75,0.08);
+    max-width:680px;
+    width:100%;
+    position:relative;
+  }
+
+  .card::before, .card::after{
+    content:'';
+    position:absolute;
+    width:18px;height:18px;
+    border:2px solid #caa64b;
+  }
+  .card::before{top:-2px;left:-2px;border-right:none;border-bottom:none;}
+  .card::after{bottom:-2px;right:-2px;border-left:none;border-top:none;}
+
+  h2{
+    font-family:'Cinzel',serif;
+    font-size:1.9rem;
+    font-weight:900;
+    letter-spacing:0.12em;
+    color:#caa64b;
+    text-transform:uppercase;
+    text-align:center;
+    margin-bottom:24px;
+    border-bottom:1px solid rgba(202,166,75,0.3);
+    padding-bottom:16px;
+  }
+
+  .scorebar{
+    display:flex;
+    justify-content:center;
+    gap:32px;
+    margin-bottom:20px;
+    font-family:'Cinzel',serif;
+    font-size:1rem;
+    letter-spacing:0.08em;
+    color:#a88a40;
+  }
+  .scorebar span{color:#e8cc80;font-weight:700;}
+
+  .stones{
+    display:flex;
+    justify-content:center;
+    gap:12px;
+    margin-bottom:20px;
+  }
+  .stone{
+    width:18px;height:18px;
+    border-radius:50%;
+    background:#3a2a10;
+    border:1px solid #5a3e14;
+    transition:background 0.4s, box-shadow 0.4s;
+  }
+  .on{
+    background:#caa64b;
+    border-color:#e8cc80;
+    box-shadow:0 0 10px rgba(202,166,75,0.7);
+  }
+
+  #wait{
+    text-align:center;
+    font-family:'Cinzel',serif;
+    font-size:1.15rem;
+    color:#a88a40;
+    letter-spacing:0.1em;
+    padding:32px 0;
+    font-style:italic;
+  }
+
+  #qnum{
+    font-family:'Cinzel',serif;
+    font-size:0.85rem;
+    letter-spacing:0.18em;
+    text-transform:uppercase;
+    color:#7a5a1e;
+    text-align:center;
+    margin-bottom:18px;
+  }
+
+  #qtxt{
+    font-size:1.35rem;
+    line-height:1.85;
+    color:#f0d88a;
+    text-align:center;
+    font-style:italic;
+    margin-bottom:32px;
+    padding:20px 16px;
+    border-top:1px solid rgba(202,166,75,0.2);
+    border-bottom:1px solid rgba(202,166,75,0.2);
+  }
+
+  .grid{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:12px;
+    margin-bottom:20px;
+  }
+
+  .grid div{
+    background:#26180a;
+    border:1px solid #5a3e14;
+    border-radius:3px;
+    padding:16px 18px;
+    font-family:'Cinzel',serif;
+    font-size:1rem;
+    letter-spacing:0.04em;
+    color:#c8a85c;
+    cursor:default;
+    transition:background 0.2s, border-color 0.2s, color 0.2s;
+    line-height:1.4;
+  }
+
+  .grid div:hover{
+    background:#341f0c;
+    border-color:#caa64b;
+    color:#f0d88a;
+  }
+
+  #fb{
+    text-align:center;
+    font-family:'Cinzel',serif;
+    font-size:1rem;
+    letter-spacing:0.06em;
+    min-height:24px;
+    color:#a88a40;
+  }
+
+  .big{
+    font-family:'Cinzel',serif;
+    font-size:2.2rem;
+    font-weight:900;
+    letter-spacing:0.12em;
+    color:#caa64b;
+    display:block;
+    text-align:center;
+    padding:24px 0;
+    text-transform:uppercase;
+  }
+
+  hr.divider{
+    border:none;
+    border-top:1px solid rgba(202,166,75,0.2);
+    margin:20px 0;
+  }
+
+  @media(max-width:480px){
+    .grid{grid-template-columns:1fr}
+    #qtxt{font-size:1.15rem}
+    h2{font-size:1.4rem}
+  }
+</style></head>
+
+<body>
+<div class="card">
+  <h2>Answer to open the door</h2>
+
+  <div class="stones">
+    <div class="stone" id="s0"></div>
+    <div class="stone" id="s1"></div>
+    <div class="stone" id="s2"></div>
+    <div class="stone" id="s3"></div>
+  </div>
+
+  <div class="scorebar">
+    Correct: <span id="c">0</span> &nbsp;|&nbsp; Wrong: <span id="w">0</span>
+  </div>
+
+  <div id="wait">Approach the Sphinx...</div>
+
+  <div id="game" style="display:none">
+    <div id="qnum"></div>
+    <div id="qtxt"></div>
+    <div class="grid" id="grid"></div>
+    <div id="fb"></div>
+  </div>
+</div>
+
+<script>
+var Q=[
+["I am born, I shrink, I die into air , yet while I live, I warm the hands of kings. What am I?",["A Coal","A Candle","Ice","A Secret"]],
+["I follow you in light, flee you in darkness. I have no flesh, no will, no breath yet I am born with you. What creature am I?",["A Shadow","A Reflection","A Ghost","Conscience"]],
+["I speak yet am never heard. I carry the wisdom of the dead to those not yet born. What creature walks this earth as me?",["A Painting","A Dream","A Book","A Gravestone"]],
+["I drink the rivers dry yet thirst forevermore. I swallow mountains whole and still cry out for more. I am the doom of all that stands ,what am I?",["Time","Fire","The Ocean","Erosion"]],
+["I have no face yet hold all faces. I speak no truth yet never lie. Look into me , what do you see?",["A Mirror","Water","A Prophecy","A Dream"]],
+["Kill me once and I grow stronger. Kill me twice and I am gone. The farmer prays for me at dawn, the soldier at dusk. Without me even kings are hollow ,what am I?",["Courage","Hunger","Hope","Faith"]],
+["All men carry me, yet none can lift me alone. I am nothing yet I have broken nations. What am I?",["A Promise","Pride","A Name","Debt"]],
+["I witnessed every murder beneath the open sky, yet I have never had an eye. I was there when the first king wept, and I shall watch all empires fall ,what sightless presence am I?",["The Wind","Stone","Darkness","Time"]]
+];
+
+var cur=0,was=false;
+
+function poll(){
+  fetch('/state').then(r=>r.json()).then(s=>{
+    document.getElementById('c').textContent=s.correct;
+    document.getElementById('w').textContent=s.wrong;
+
+    for(let i=0;i<4;i++)
+      document.getElementById('s'+i).classList.toggle('on',i<s.correct/2);
+
+    var wait=document.getElementById('wait');
+    var game=document.getElementById('game');
+
+    if(s.over){
+      game.style.display='none';
+      wait.style.display='block';
+      wait.innerHTML=s.result=="win"
+        ?"<span class='big'>YOU WIN</span>"
+        :"<span class='big'>GAME OVER, YOU HAVE FAILED</span>";
+      return;
+    }
+
+    if(s.active){
+      if(!was){was=true;cur=0;show(0);}
+      else if(s.q!=cur){cur=s.q;show(cur);}
+    }else{
+      was=false;
+      wait.style.display='block';
+      game.style.display='none';
+    }
+  });
+}
+
+setInterval(poll,700);
+
+function show(i){
+  var r=Q[i];
+  document.getElementById('wait').style.display='none';
+  document.getElementById('game').style.display='block';
+  document.getElementById('qnum').textContent="Riddle "+(i+1)+" of 8";
+  document.getElementById('qtxt').textContent=r[0];
+  var grid=document.getElementById('grid');
+  grid.innerHTML="";
+  ["A","B","C","D"].forEach(function(l,j){
+    var d=document.createElement('div');
+    d.textContent=l+".  "+r[1][j];
+    grid.appendChild(d);
+  });
+}
+</script>
+</body></html>
+"""
+
+# SERVER
+def handle(conn):
+    req = conn.recv(512).decode()
+    path = req.split(' ')[1]
+
+    if path=='/' or path=='/index.html':
+        conn.send('HTTP/1.1 200 OK\r\nContent-Type:text/html\r\n\r\n')
+        conn.send(PAGE)
+
+    elif path=='/state':
+        data = '{"q":%d,"correct":%d,"wrong":%d,"active":%s,"res":"%s","over":%s,"result":"%s"}' % (
+            q, correct, wrong,
+            'true' if active else 'false',
+            last_result,
+            'true' if game_over else 'false',
+            game_result
+        )
+        conn.send('HTTP/1.1 200 OK\r\nContent-Type:application/json\r\n\r\n')
+        conn.send(data)
+
+    conn.close()
+
+#MAIN LOOP
+while True:
+
+    try:
+        c,_ = server.accept()
+        handle(c)
+    except:
+        pass
+
+    if game_over:
+        time.sleep(0.1)
+        continue
+
+    if not active:
+        if distance() < 20:
+            start_game()
+        time.sleep(0.2)
+        continue
+
+    t = get_touch()
+
+    if t != -1 and q < len(answers) and active:
+        if t == answers[q]:
+            do_correct()
+        else:
+            do_wrong()
+        time.sleep(0.4)
+
+    time.sleep(0.05)
